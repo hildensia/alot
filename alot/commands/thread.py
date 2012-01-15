@@ -5,6 +5,7 @@ from twisted.internet.defer import inlineCallbacks
 import shlex
 import re
 import subprocess
+import email
 
 from alot.commands import Command, registerCommand
 from alot.commands.globals import ExternalCommand
@@ -713,3 +714,27 @@ class VerifyCommand(Command):
             ui.notify(out, priority=prio)
         else:
             ui.notify('message not signed', priority='error')
+
+
+@registerCommand(MODE, 'decrypt')
+class DecryptCommand(Command):
+    """decrypt selected message"""
+
+    def apply(self, ui):
+        msgw = ui.current_buffer.get_selection()
+        msg = msgw.get_message()
+
+        if msg.is_encrypted():
+            if msg._decrypted_email is None:
+                cryptotext = msg.get_encrypted_message()
+                plaintext, info, rval = crypto.decrypt(cryptotext)
+
+                if rval == 0:
+                    plaintext = plaintext.encode('ascii')
+                    msg._decrypted_email = email.message_from_string(plaintext)
+                    msgw.rebuild()
+                else:
+                    prio = 'error'
+                    ui.notify(info, priority=prio)
+        else:
+            ui.notify('message not encrypted', priority='error')
