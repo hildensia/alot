@@ -11,6 +11,7 @@ from email.mime.image import MIMEImage
 from email.mime.text import MIMEText
 import urwid
 import magic
+import tidy
 
 from settings import config
 
@@ -343,3 +344,32 @@ def humanize_size(size):
         if size / factor < 1024:
             return format_string % (float(size) / factor)
     return format_string % (size / factor)
+
+
+def extract_html(part):
+    """
+    this returns valid, decoded html code for a given email part. It
+    * reads the character encoding from message headers or guesses it,
+    * converts the content to utf-8,
+    * calls libtidy to repair broken html code,
+    * adds a charset meta tag
+
+    :param part: email part containing html code
+    :type part: `email.message.Message`
+    """
+    #get decoded payload
+    html_code = part.get_payload(decode=True)
+    # get encoding
+    ct_params = dict(part.get_params('Content-Type'))
+    charset = ct_params.get('charset', guess_encoding(html_code))
+    # get unicode representation
+    html_code = string_decode(html_code, enc=charset)
+    # tidy up html code, hading over encoding string
+    doc = tidy.parseString(html_code.encode('utf-8'), char_encoding='utf8',
+                           indent=1, tidy_mark=0)
+    tidied_payload = doc.__str__()
+
+    # add meta info
+    mi = '<meta http-equiv="Content-Type" content="text/html; charset="utf-8">'
+    output = re.sub('<head>', '<head>\n' + mi, tidied_payload)
+    return output
