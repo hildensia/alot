@@ -346,26 +346,17 @@ def humanize_size(size):
     return format_string % (size / factor)
 
 
-def extract_html(part):
+def tidy_html(html):
     """
-    this returns valid, decoded html code for a given email part. It
-    * reads the character encoding from message headers or guesses it,
-    * converts the content to utf-8,
+    tidy up html code. This
     * calls libtidy to repair broken html code,
     * adds a charset meta tag
 
-    :param part: email part containing html code
-    :type part: `email.message.Message`
+    :param html: html code to be tidied
+    :type html: unicode
     """
-    #get decoded payload
-    html_code = part.get_payload(decode=True)
-    # get encoding
-    ct_params = dict(part.get_params('Content-Type'))
-    charset = ct_params.get('charset', guess_encoding(html_code))
-    # get unicode representation
-    html_code = string_decode(html_code, enc=charset)
     # tidy up html code, hading over encoding string
-    doc = tidy.parseString(html_code.encode('utf-8'), char_encoding='utf8',
+    doc = tidy.parseString(html.encode('utf-8'), char_encoding='utf8',
                            indent=1, tidy_mark=0)
     tidied_payload = doc.__str__()
 
@@ -373,3 +364,21 @@ def extract_html(part):
     mi = '<meta http-equiv="Content-Type" content="text/html; charset="utf-8">'
     output = re.sub('<head>', '<head>\n' + mi, tidied_payload)
     return output
+
+
+def read_text_part(self, part):
+    """
+    parses the content of a content-type 'text' email part into a unicode
+    bytestring
+
+    :param part: email part to parse. needs to have content maintype 'text'
+    :type part: `email.message.Message`
+    """
+    # get raw (QP decoded) text
+    raw_text = part.get_payload(decode=True)
+    # get charset
+    ct_params = dict(part.get_params('Content-Type'))
+    charset = ct_params.get('charset', helper.guess_encoding(raw_text))
+    # decode to unicode
+    text = string_decode(raw_text, enc=charset)
+    return text
