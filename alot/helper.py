@@ -12,6 +12,7 @@ from email.mime.text import MIMEText
 import urwid
 import magic
 import tidy
+import re
 
 from settings import config
 
@@ -366,7 +367,7 @@ def tidy_html(html):
     return output
 
 
-def read_text_part(self, part):
+def read_text_part(part):
     """
     parses the content of a content-type 'text' email part into a unicode
     bytestring
@@ -378,7 +379,7 @@ def read_text_part(self, part):
     raw_text = part.get_payload(decode=True)
     # get charset
     ct_params = dict(part.get_params('Content-Type'))
-    charset = ct_params.get('charset', helper.guess_encoding(raw_text))
+    charset = ct_params.get('charset', guess_encoding(raw_text))
     # decode to unicode
     text = string_decode(raw_text, enc=charset)
     return text
