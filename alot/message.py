@@ -47,8 +47,37 @@ class Message(object):
         self._from = helper.safely_get(lambda: msg.get_header('From'),
                                        NullPointerError)
         self._email = None  # will be read upon first use
-        self._attachments = None  # will be read upon first use
+        self._attachments = []  # will be read upon first use
+        self._inlines = []  # stores inline parts
         self._tags = set(msg.get_tags())
+
+    def read_mail(self):
+        self.read_part(self.get_email())
+
+    def read_part(self, part):
+        ctype = part.get_content_type()
+        maintype = part.get_content_maintype()
+        subtype = part.get_content_subtype()
+        cdisp = part.get('Content-Disposition', '')
+
+        if maintype = 'text':
+            if cdisp.startswith('attachment'):
+                self._attachments.append(Attachment(part))
+            else:
+                content = helper.read_text(part)
+                if subtype == 'html':
+                    content = helper.tidy_html(content)
+                self._inlines.append((ctype, content, None))
+        elif ctype == 'multipart/alternative':
+            # if payload contains an html and a plaintext alternative,
+            # self._inlines.append((ctype, html, alternative))
+            pass
+
+        elif ctype == 'multipart/mixed':
+            for subpart in part.get_payload():
+                self.read_part(subpart)
+        else:  # catchall to attachments
+            self._attachments.append(Attachment(part))
 
     def __str__(self):
         """prettyprint the message"""
