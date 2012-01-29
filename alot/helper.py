@@ -288,7 +288,7 @@ def call_cmd_async(cmdlist, stdin=None):
 
     d = defer.Deferred()
     proc = process.Process(executable=cmdlist[0], args=cmdlist[1:],
-                           _EverythingGetter(d))
+                           proto=_EverythingGetter(d))
     if stdin:
         proc.write(stdin)
     return d

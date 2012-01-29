@@ -1,5 +1,6 @@
 import urwid
 import logging
+import shlex
 
 from settings import config
 from helper import shorten_author_string
@@ -7,6 +8,7 @@ from helper import pretty_datetime
 from helper import tag_cmp
 from helper import string_decode
 import message
+from settings import get_mime_handler
 
 
 class DialogBox(urwid.WidgetWrap):
@@ -512,7 +514,7 @@ class MessageWidget(urwid.WidgetWrap):
     def _get_body_widget(self):
         """creates/returns the widget that displays the mail body"""
         if not self.bodyw:
-            cols = [MessageBodyWidget(self.message.get_email())]
+            cols = [MessageBodyWidget(self.message)]
             bc = list()
             if self.depth:
                 cols.insert(0, self._get_spacer(self.bars_at[1:]))
@@ -667,9 +669,65 @@ class MessageBodyWidget(urwid.AttrMap):
         * `thread_body`
     """
 
-    def __init__(self, msg):
-        bodytxt = message.extract_body(msg)
-        urwid.AttrMap.__init__(self, urwid.Text(bodytxt), 'thread_body')
+    def __init__(self, message):
+        self.body = None
+        self.message = message
+        self.default_att = 'thread_body'
+        self.parts = {}
+        self.body = urwid.Text('Loading..')
+        urwid.AttrMap.__init__(self, self.body, 'thread_body')
+        message.read_mail() # TODO MOVE
+        self.rebuild()
+
+    def rebuild(self):
+        logging.debug('rebuild')
+        self.body.set_text('Loading..')
+        i = 0
+        for (ctype, content, alternative) in self.message._inlines:
+            logging.debug('new inline: %s' % ctype)
+            # create empty "loading" markup
+            default = (self.default_att, 'Loading: %s part' % ctype)
+            self.parts[i] = default
+            # define callback that updates markup
+            def update_part(text):
+                logging.debug('UPDATING part %d' % i)
+                self.parts[i] = text
+                #self.rebuild()
+
+            #get mime handler
+            handler = get_mime_handler(ctype, key='view',
+                                       interactive=False)
+            if handler:
+                #open tempfile. Not all handlers accept stuff from stdin
+                tmpfile = tempfile.NamedTemporaryFile(delete=False)
+                #write to tmpfile
+                tmpfile.write(content)
+                tmpfile.close()
+                #create and call external command
+                cmd = handler % tmpfile.name
+                cmdlist = shlex.split(cmd.encode('utf-8', errors='ignore'))
+
+                d = helper.call_cmd_async(cmdlist)
+
+                # call handler to deferred
+                @d.addCallback
+                def cb((out, err, rval)):
+                    #remove tempfile
+                    os.unlink(tmpfile.name)
+                    # TODO: handle errors
+                    if out:
+                        update_part(out)
+                    return d
+            else:
+                update_part([])
+            i += 1
+        logging.debug('PARTS')
+        logging.debug(self.parts)
+        part_markups = self.parts.values()
+        logging.debug(part_markups)
+        #joined_markups = reduce(list.__add__, part_markups + [[]])
+        self.body.set_text(part_markups)
+
 
 
 class AttachmentWidget(urwid.WidgetWrap):
