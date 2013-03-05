@@ -98,7 +98,7 @@ class SettingsManager(object):
                     self._theme = Theme(theme_path)
                 except ConfigError as e:
                     err_msg = 'Theme file %s failed validation:\n'
-                    raise ConfigError((err_msg % themestring) + e.message)
+                    raise ConfigError((err_msg % themestring) + str(e.message))
 
         # if still no theme is set, resort to default
         if self._theme is None:
@@ -309,9 +309,9 @@ class SettingsManager(object):
                 return self.hooks.__dict__[key]
         return None
 
-    def get_mapped_input_keysequences(self, mode=None, prefix=u''):
+    def get_mapped_input_keysequences(self, mode='global', prefix=u''):
         candidates = self._bindings.scalars
-        if mode is not None:
+        if mode != 'global':
             candidates = candidates + self._bindings[mode].scalars
         return [s for s in candidates if s.startswith(prefix)]
 

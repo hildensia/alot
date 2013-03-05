@@ -4,7 +4,7 @@ Installation
 .. rubric:: dependencies
 
 Alot depends on recent versions of notmuch and urwid. Note that due to restrictions
-on argparse and subprocess, you need to run *python ≥ `2.7`*.
+on argparse and subprocess, you need to run *`3.0` > python ≥ `2.7`* (see :ref:`faq <faq_7>`).
 A full list of dependencies is below:
 
 * `libmagic and python bindings <http://darwinsys.com/file/>`_, ≥ `5.04`:
@@ -17,6 +17,10 @@ A full list of dependencies is below:
 On debian/ubuntu these are packaged as::
 
   python-magic python-configobj python-twisted python-notmuch python-urwid python-gpgme
+
+On fedora/redhat these are packaged as::
+
+  python-magic python-configobj python-twisted python-notmuch python-urwid pygpgme
 
 Alot uses `mailcap <http://en.wikipedia.org/wiki/Mailcap>`_ to look up mime-handler for inline
 rendering and opening of attachments.  For a full description of the maicap protocol consider the
