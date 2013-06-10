@@ -281,7 +281,7 @@ class CommandNameCompleter(Completer):
         self.mode = mode
 
     def complete(self, original, pos):
-        #TODO refine <tab> should get current querystring
+        # TODO refine <tab> should get current querystring
         commandprefix = original[:pos]
         logging.debug('original="%s" prefix="%s"' % (original, commandprefix))
         cmdlist = commands.COMMANDS['global'].copy()
@@ -349,7 +349,7 @@ class CommandCompleter(Completer):
                     if a and not a.startswith('-'):
                         all_optionals = False
                 # complete optional parameter if
-                # 1. all arguments prior to current position are optional parameter
+                # 1. all arguments prior to current position are optional
                 # 2. the parameter starts with '-' or we are at its beginning
                 if all_optionals:
                     myarg = arguments_until_now[-1]
@@ -426,18 +426,31 @@ class CommandCompleter(Completer):
                     res = self._pathcompleter.complete(params, localpos)
                 elif self.mode == 'envelope' and cmd in ['sign', 'togglesign']:
                     res = self._secretkeyscompleter.complete(params, localpos)
-                elif self.mode == 'envelope' and cmd in ['encrypt', 
+                elif self.mode == 'envelope' and cmd in ['encrypt',
                                                          'rmencrypt',
                                                          'toggleencrypt']:
                     res = self._publickeyscompleter.complete(params, localpos)
                 # thread
                 elif self.mode == 'thread' and cmd == 'save':
                     res = self._pathcompleter.complete(params, localpos)
+                elif self.mode == 'thread' and cmd in ['fold', 'unfold',
+                                                       'togglesource',
+                                                       'toggleheaders']:
+                    res = self._querycompleter.complete(params, localpos)
                 elif self.mode == 'thread' and cmd in ['tag', 'retag', 'untag',
                                                        'toggletags']:
                     localcomp = MultipleSelectionCompleter(self._tagcompleter,
                                                            separator=',')
                     res = localcomp.complete(params, localpos)
+                elif cmd == 'move':
+                    directions = ['up', 'down', 'page up', 'page down']
+                    if self.mode == 'thread':
+                        directions += ['first', 'next', 'previous',
+                                       'last reply', 'first reply', 'parent',
+                                       'next unfolded', 'previous unfolded',
+                                       'next sibling', 'previous sibling']
+                    localcompleter = StringlistCompleter(directions)
+                    res = localcompleter.complete(params, localpos)
 
                 # prepend cmd and correct position
                 res = [('%s %s' % (cmd, t), p + len(cmd) +

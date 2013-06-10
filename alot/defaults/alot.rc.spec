@@ -1,6 +1,9 @@
 
 ask_subject = boolean(default=True) # ask for subject when compose
 
+# automatically remove 'unread' tag when focussing messages in thread mode
+auto_remove_unread = boolean(default=True)
+
 # prompt for initial tags when compose
 compose_ask_tags = boolean(default=False)
 
@@ -197,6 +200,17 @@ bounce_force_realname = boolean(default=True)
 # Set this to False to use the address string as received in the original message.
 bounce_force_address = boolean(default=False)
 
+# When group-reply-ing to an email that has the "Mail-Followup-To" header set,
+# use the content of this header as the new "To" header and leave the "Cc"
+# header empty
+honor_followup_to = boolean(default=False)
+
+# When one of the recipients of an email is a subscribed mailing list, set the
+# "Mail-Followup-To" header to the list of recipients without yourself
+followup_to = boolean(default=False)
+
+# The list of addresses associated to the mailinglists you are subscribed to
+mailinglists = force_list(default=list())
 
 # prefer plaintext alternatives over html content in multipart/alternative
 prefer_plaintext = boolean(default=False)

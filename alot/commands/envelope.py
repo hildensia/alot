@@ -22,16 +22,16 @@ from alot.helper import string_decode
 from alot.settings import settings
 from alot.utils.booleanaction import BooleanAction
 
-import gpgme
-
 
 MODE = 'envelope'
 
 
 @registerCommand(MODE, 'attach', arguments=[
-    (['path'], {'help':'file(s) to attach (accepts wildcads)'})])
+    (['path'], {'help': 'file(s) to attach (accepts wildcads)'})])
 class AttachCommand(Command):
     """attach files to the mail"""
+    repeatable = True
+
     def __init__(self, path=None, **kwargs):
         """
         :param path: files to attach (globable string)
@@ -59,8 +59,35 @@ class AttachCommand(Command):
         ui.current_buffer.rebuild()
 
 
+@registerCommand(MODE, 'unattach', arguments=[
+    (['hint'], {'nargs': '?', 'help': 'which attached file to remove'}),
+])
+class UnattachCommand(Command):
+    """remove attachments from current envelope"""
+    repeatable = True
+
+    def __init__(self, hint=None, **kwargs):
+        """
+        :param hint: which attached file to remove
+        :type hint: str
+        """
+        Command.__init__(self, **kwargs)
+        self.hint = hint
+
+    def apply(self, ui):
+        envelope = ui.current_buffer.envelope
+
+        if self.hint is not None:
+            for a in envelope.attachments:
+                if self.hint in a.get_filename():
+                    envelope.attachments.remove(a)
+        else:
+            envelope.attachments = []
+        ui.current_buffer.rebuild()
+
+
 @registerCommand(MODE, 'refine', arguments=[
-    (['key'], {'help':'header to refine'})])
+    (['key'], {'help': 'header to refine'})])
 class RefineCommand(Command):
     """prompt to change the value of a header"""
     def __init__(self, key='', **kwargs):
@@ -240,10 +267,10 @@ class SendCommand(Command):
 
 
 @registerCommand(MODE, 'edit', arguments=[
-    (['--spawn'], {'action': BooleanAction, 'default':None,
-                   'help':'spawn editor in new terminal'}),
-    (['--refocus'], {'action': BooleanAction, 'default':True,
-                     'help':'refocus envelope after editing'})])
+    (['--spawn'], {'action': BooleanAction, 'default': None,
+                   'help': 'spawn editor in new terminal'}),
+    (['--refocus'], {'action': BooleanAction, 'default': True,
+                     'help': 'refocus envelope after editing'})])
 class EditCommand(Command):
     """edit mail"""
     def __init__(self, envelope=None, spawn=None, refocus=True, **kwargs):
@@ -266,7 +293,7 @@ class EditCommand(Command):
         if not self.envelope:
             self.envelope = ui.current_buffer.envelope
 
-        #determine editable headers
+        # determine editable headers
         edit_headers = set(settings.get('edit_headers_whitelist'))
         if '*' in edit_headers:
             edit_headers = set(self.envelope.headers.keys())
@@ -332,7 +359,7 @@ class EditCommand(Command):
         if translate:
             content = translate(content, ui=ui, dbm=ui.dbman)
 
-        #write stuff to tempfile
+        # write stuff to tempfile
         old_tmpfile = None
         if self.envelope.tmpfile:
             old_tmpfile = self.envelope.tmpfile
@@ -352,9 +379,9 @@ class EditCommand(Command):
 
 
 @registerCommand(MODE, 'set', arguments=[
-    (['--append'], {'action': 'store_true', 'help':'keep previous values'}),
-    (['key'], {'help':'header to refine'}),
-    (['value'], {'nargs':'+', 'help':'value'})])
+    (['--append'], {'action': 'store_true', 'help': 'keep previous values'}),
+    (['key'], {'help': 'header to refine'}),
+    (['value'], {'nargs': '+', 'help': 'value'})])
 class SetCommand(Command):
     """set header value"""
     def __init__(self, key, value, append=False, **kwargs):
@@ -379,7 +406,7 @@ class SetCommand(Command):
 
 
 @registerCommand(MODE, 'unset', arguments=[
-    (['key'], {'help':'header to refine'})])
+    (['key'], {'help': 'header to refine'})])
 class UnsetCommand(Command):
     """remove header field"""
     def __init__(self, key, **kwargs):
@@ -398,20 +425,24 @@ class UnsetCommand(Command):
 @registerCommand(MODE, 'toggleheaders')
 class ToggleHeaderCommand(Command):
     """toggle display of all headers"""
+    repeatable = True
+
     def apply(self, ui):
         ui.current_buffer.toggle_all_headers()
 
 
 @registerCommand(MODE, 'sign', forced={'action': 'sign'}, arguments=[
-    (['keyid'], {'nargs':argparse.REMAINDER, 'help':'which key id to use'})],
+    (['keyid'], {'nargs': argparse.REMAINDER, 'help': 'which key id to use'})],
     help='mark mail to be signed before sending')
 @registerCommand(MODE, 'unsign', forced={'action': 'unsign'},
                  help='mark mail not to be signed before sending')
 @registerCommand(MODE, 'togglesign', forced={'action': 'toggle'}, arguments=[
-    (['keyid'], {'nargs':argparse.REMAINDER, 'help':'which key id to use'})],
+    (['keyid'], {'nargs': argparse.REMAINDER, 'help': 'which key id to use'})],
     help='toggle sign status')
 class SignCommand(Command):
     """toggle signing this email"""
+    repeatable = True
+
     def __init__(self, action=None, keyid=None, **kwargs):
         """
         :param action: whether to sign/unsign/toggle
@@ -453,6 +484,7 @@ class SignCommand(Command):
 
 
 @registerCommand(MODE, 'encrypt', forced={'action': 'encrypt'}, arguments=[
+<<<<<<< HEAD
     (['keyids'], {'nargs':argparse.REMAINDER,
                   'help': 'keyid of the key to encrypt with'})])
 @registerCommand(MODE, 'unencrypt', forced={'action': 'unencrypt'})
@@ -464,6 +496,23 @@ class SignCommand(Command):
                  arguments=[
                      (['keyids'], {'nargs': argparse.REMAINDER,
                       'help':'keyid of the key to encrypt with'})])
+=======
+    (['keyids'], {'nargs': argparse.REMAINDER,
+                  'help': 'keyid of the key to encrypt with'})],
+    help='request encryption of message before sendout')
+@registerCommand(MODE, 'unencrypt', forced={'action': 'unencrypt'},
+                 help='remove request to encrypt message before sending')
+@registerCommand(MODE, 'toggleencrypt', forced={'action': 'toggleencrypt'},
+                 arguments=[
+                     (['keyids'], {'nargs': argparse.REMAINDER,
+                      'help': 'keyid of the key to encrypt with'})],
+                 help='toggle if message should be encrypted before sendout')
+@registerCommand(MODE, 'rmencrypt', forced={'action': 'rmencrypt'},
+                 arguments=[
+                     (['keyids'], {'nargs': argparse.REMAINDER,
+                      'help': 'keyid of the key to encrypt with'})],
+                 help='do not encrypt to given recipient key')
+>>>>>>> 5820ef46cfff2799abbc63e47443ee82692b25d4
 class EncryptCommand(Command):
     def __init__(self, action=None, keyids=None, **kwargs):
         """
@@ -516,11 +565,19 @@ class EncryptCommand(Command):
                     if e.code == GPGCode.AMBIGUOUS_NAME:
                         possible_keys = crypto.list_keys(hint=keyid)
                         tmp_choices = [k.uids[0].uid for k in possible_keys]
+<<<<<<< HEAD
                         choices = {str(len(tmp_choices) - x) : tmp_choices[x] 
                                    for x in range(0, len(tmp_choices))} 
                         keyid = yield ui.choice("This keyid was ambiguous. " +
                                         "Which key do you want to use?",
                                         choices, cancel=None)
+=======
+                        choices = {str(len(tmp_choices) - x): tmp_choices[x]
+                                   for x in range(0, len(tmp_choices))}
+                        keyid = yield ui.choice("ambiguous keyid! Which" +
+                                                "key do you want to use?",
+                                                choices, cancel=None)
+>>>>>>> 5820ef46cfff2799abbc63e47443ee82692b25d4
                         if keyid:
                             self.encrypt_keys.append(keyid)
                         continue
@@ -530,5 +587,5 @@ class EncryptCommand(Command):
                 envelope.encrypt_keys[crypto.hash_key(key)] = key
             if not envelope.encrypt_keys:
                 envelope.encrypt = False
-        #reload buffer
+        # reload buffer
         ui.current_buffer.rebuild()

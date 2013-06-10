@@ -18,7 +18,7 @@ import alot.helper as helper
 import alot.crypto as crypto
 import gpgme
 from alot.settings import settings
-from alot.errors import GPGProblem
+from alot.errors import GPGProblem, GPGCode
 
 from attachment import Attachment
 from utils import encode_header
@@ -26,14 +26,16 @@ from utils import encode_header
 
 class Envelope(object):
     """a message that is not yet sent and still editable.
-    It holds references to unencoded! body text and mail headers among other things.
-    Envelope implements the python container API for easy access of header values.
-    So `e['To']`, `e['To'] = 'foo@bar.baz'` and 'e.get_all('To')' would work for
-    an envelope `e`..
+    It holds references to unencoded! body text and mail headers among other
+    things.  Envelope implements the python container API for easy access of
+    header values.  So `e['To']`, `e['To'] = 'foo@bar.baz'` and
+    'e.get_all('To')' would work for an envelope `e`..
     """
 
     headers = None
-    """dict containing the mail headers (a list of strings for each header key)"""
+    """
+    dict containing the mail headers (a list of strings for each header key)
+    """
     body = None
     """mail body as unicode string"""
     tmpfile = None
@@ -43,8 +45,9 @@ class Envelope(object):
     tags = []
     """tags  # tags to add after successful sendout"""
 
-    def __init__(self, template=None, bodytext=u'', headers=None, attachments=[],
-                 sign=False, sign_key=None, encrypt=False, tags=[]):
+    def __init__(
+        self, template=None, bodytext=u'', headers=None, attachments=[],
+            sign=False, sign_key=None, encrypt=False, tags=[]):
         """
         :param template: if not None, the envelope will be initialised by
                          :meth:`parsing <parse_template>` this string before
@@ -56,7 +59,7 @@ class Envelope(object):
         :type headers: dict (str -> [unicode])
         :param attachments: file attachments to include
         :type attachments: list of :class:`~alot.db.attachment.Attachment`
-        :param tags: tags to add after successful sendout and saving this message
+        :param tags: tags to add after successful sendout and saving this msg
         :type tags: list of str
         """
         assert isinstance(bodytext, unicode)
@@ -189,8 +192,9 @@ class Envelope(object):
                 signatures, signature_str = crypto.detached_signature_for(
                     plaintext, self.sign_key)
                 if len(signatures) != 1:
-                    raise GPGProblem(("Could not sign message "
-                                      "(GPGME did not return a signature)"))
+                    raise GPGProblem("Could not sign message (GPGME "
+                                     "did not return a signature)",
+                                     code=GPGCode.KEY_CANNOT_SIGN)
             except gpgme.GpgmeError as e:
                 if e.code == gpgme.ERR_BAD_PASSPHRASE:
                     # If GPG_AGENT_INFO is unset or empty, the user just does
@@ -198,11 +202,12 @@ class Envelope(object):
                     if os.environ.get('GPG_AGENT_INFO', '').strip() == '':
                         msg = "Got invalid passphrase and GPG_AGENT_INFO\
                                 not set. Please set up gpg-agent."
-                        raise GPGProblem(msg)
+                        raise GPGProblem(msg, code=GPGCode.BAD_PASSPHRASE)
                     else:
-                        raise GPGProblem(("Bad passphrase. Is "
-                                          "gpg-agent running?"))
-                raise GPGProblem(str(e))
+                        raise GPGProblem("Bad passphrase. Is gpg-agent "
+                                         "running?",
+                                         code=GPGCode.BAD_PASSPHRASE)
+                raise GPGProblem(str(e), code=GPGCode.KEY_CANNOT_SIGN)
 
             micalg = crypto.RFC3156_micalg_from_algo(signatures[0].hash_algo)
             unencrypted_msg = MIMEMultipart('signed', micalg=micalg,
@@ -232,7 +237,7 @@ class Envelope(object):
                 encrypted_str = crypto.encrypt(plaintext,
                                                self.encrypt_keys.values())
             except gpgme.GpgmeError as e:
-                raise GPGProblem(str(e))
+                raise GPGProblem(str(e), code=GPGCode.KEY_CANNOT_ENCRYPT)
 
             outer_msg = MIMEMultipart('encrypted',
                                       protocol='application/pgp-encrypted')
@@ -321,7 +326,7 @@ class Envelope(object):
             # interpret 'Attach' pseudo header
             if 'Attach' in self:
                 to_attach = []
-                for line in self['Attach']:
+                for line in self.get_all('Attach'):
                     gpath = os.path.expanduser(line.strip())
                     to_attach += filter(os.path.isfile, glob.glob(gpath))
                 logging.debug('Attaching: %s' % to_attach)

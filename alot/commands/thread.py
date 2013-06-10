@@ -5,9 +5,10 @@ import os
 import re
 import logging
 import tempfile
+import argparse
 from twisted.internet.defer import inlineCallbacks
 import subprocess
-from email.Utils import getaddresses
+from email.Utils import getaddresses, parseaddr
 import mailcap
 from cStringIO import StringIO
 
@@ -15,6 +16,7 @@ from alot.commands import Command, registerCommand
 from alot.commands.globals import ExternalCommand
 from alot.commands.globals import FlushCommand
 from alot.commands.globals import ComposeCommand
+from alot.commands.globals import MoveCommand
 from alot.commands.envelope import SendCommand
 from alot import completion
 from alot.db.utils import decode_header
@@ -31,7 +33,6 @@ from alot.utils.booleanaction import BooleanAction
 from alot.completion import ContactsCompleter
 
 from alot.widgets.globals import AttachmentWidget
-from alot.widgets.thread import MessageSummaryWidget
 
 MODE = 'thread'
 
@@ -54,21 +55,22 @@ def determine_sender(mail, action='reply'):
     my_accounts = settings.get_accounts()
     assert my_accounts, 'no accounts set!'
 
-    # extract list of recipients to check for my address
-    recipients = getaddresses(mail.get_all('To', [])
-            + mail.get_all('Cc', [])
-            + mail.get_all('Delivered-To', []))
+    # extract list of addresses to check for my address
+    candidate_addresses = getaddresses(mail.get_all('To', []) +
+                                       mail.get_all('Cc', []) +
+                                       mail.get_all('Delivered-To', []) +
+                                       mail.get_all('From', []))
 
-    logging.debug('recipients: %s' % recipients)
-    # pick the most important account that has an address in recipients
-    # and use that accounts realname and the found recipient address
+    logging.debug('candidate addresses: %s' % candidate_addresses)
+    # pick the most important account that has an address in candidates
+    # and use that accounts realname and the address found here
     for account in my_accounts:
         acc_addresses = account.get_addresses()
         for alias in acc_addresses:
             if realname is not None:
                 break
-            regex = re.compile(alias)
-            for seen_name, seen_address in recipients:
+            regex = re.compile(re.escape(alias))
+            for seen_name, seen_address in candidate_addresses:
                 if regex.match(seen_address):
                     logging.debug("match!: '%s' '%s'" % (seen_address, alias))
                     if settings.get(action + '_force_realname'):
@@ -93,11 +95,13 @@ def determine_sender(mail, action='reply'):
 
 
 @registerCommand(MODE, 'reply', arguments=[
-    (['--all'], {'action':'store_true', 'help':'reply to all'}),
-    (['--spawn'], {'action': BooleanAction, 'default':None,
-                   'help':'open editor in new window'})])
+    (['--all'], {'action': 'store_true', 'help': 'reply to all'}),
+    (['--spawn'], {'action': BooleanAction, 'default': None,
+                   'help': 'open editor in new window'})])
 class ReplyCommand(Command):
     """reply to message"""
+    repeatable = True
+
     def __init__(self, message=None, all=False, spawn=None, **kwargs):
         """
         :param message: message to reply to (defaults to selected message)
@@ -158,22 +162,59 @@ class ReplyCommand(Command):
 
         # set To
         sender = mail['Reply-To'] or mail['From']
-        recipients = [sender]
         my_addresses = settings.get_addresses()
-        if self.groupreply:
-            if sender != mail['From']:
-                recipients.append(mail['From'])
-            cleared = self.clear_my_address(my_addresses, mail.get('To', ''))
-            recipients.append(cleared)
+        sender_address = parseaddr(sender)[1]
+        cc = ''
 
-            # copy cc for group-replies
-            if 'Cc' in mail:
-                cc = self.clear_my_address(my_addresses, mail['Cc'])
-                envelope.add('Cc', decode_header(cc))
+        # check if reply is to self sent message
+        if sender_address in my_addresses:
+            recipients = [mail['To']]
+            emsg = 'Replying to own message, set recipients to: %s' \
+                % recipients
+            logging.debug(emsg)
+        else:
+            recipients = [sender]
+
+        if self.groupreply:
+            # make sure that our own address is not included
+            # if the message was self-sent, then our address is not included
+            MFT = mail.get_all('Mail-Followup-To', [])
+            followupto = self.clear_my_address(my_addresses, MFT)
+            if followupto and settings.get('honor_followup_to'):
+                logging.debug('honor followup to: %s', followupto)
+                recipients = [followupto]
+                # since Mail-Followup-To was set, ignore the Cc header
+            else:
+                if sender != mail['From']:
+                    recipients.append(mail['From'])
+
+                # append To addresses if not replying to self sent message
+                if sender_address not in my_addresses:
+                    cleared = self.clear_my_address(
+                        my_addresses, mail.get_all('To', []))
+                    recipients.append(cleared)
+
+                # copy cc for group-replies
+                if 'Cc' in mail:
+                    cc = self.clear_my_address(
+                        my_addresses, mail.get_all('Cc', []))
+                    envelope.add('Cc', decode_header(cc))
 
         to = ', '.join(recipients)
         logging.debug('reply to: %s' % to)
         envelope.add('To', decode_header(to))
+
+        # if any of the recipients is a mailinglist that we are subscribed to,
+        # set Mail-Followup-To header so that duplicates are avoided
+        if settings.get('followup_to'):
+            # to and cc are already cleared of our own address
+            allrecipients = [to] + [cc]
+            lists = settings.get('mailinglists')
+            # check if any recipient address matches a known mailing list
+            if any([addr in lists for n, addr in getaddresses(allrecipients)]):
+                followupto = ', '.join(allrecipients)
+                logging.debug('mail followup to: %s' % followupto)
+                envelope.add('Mail-Followup-To', decode_header(followupto))
 
         # set In-Reply-To header
         envelope.add('In-Reply-To', '<%s>' % self.message.get_message_id())
@@ -195,19 +236,25 @@ class ReplyCommand(Command):
                                         spawn=self.force_spawn))
 
     def clear_my_address(self, my_addresses, value):
+        """return recipient header without the addresses in my_addresses"""
         new_value = []
-        for entry in value.split(','):
-            if not [a for a in my_addresses if a in entry]:
-                new_value.append(entry.strip())
+        for name, address in getaddresses(value):
+            if address not in my_addresses:
+                if name != '':
+                    new_value.append('"%s" <%s>' % (name, address))
+                else:
+                    new_value.append(address)
         return ', '.join(new_value)
 
 
 @registerCommand(MODE, 'forward', arguments=[
-    (['--attach'], {'action':'store_true', 'help':'attach original mail'}),
-    (['--spawn'], {'action': BooleanAction, 'default':None,
-                   'help':'open editor in new window'})])
+    (['--attach'], {'action': 'store_true', 'help': 'attach original mail'}),
+    (['--spawn'], {'action': BooleanAction, 'default': None,
+                   'help': 'open editor in new window'})])
 class ForwardCommand(Command):
     """forward message"""
+    repeatable = True
+
     def __init__(self, message=None, attach=True, spawn=None, **kwargs):
         """
         :param message: message to forward (defaults to selected message)
@@ -285,6 +332,8 @@ class ForwardCommand(Command):
 @registerCommand(MODE, 'bounce')
 class BounceMailCommand(Command):
     """directly re-send selected message"""
+    repeatable = True
+
     def __init__(self, message=None, **kwargs):
         """
         :param message: message to bounce (defaults to selected message)
@@ -344,8 +393,8 @@ class BounceMailCommand(Command):
 
 
 @registerCommand(MODE, 'editnew', arguments=[
-    (['--spawn'], {'action': BooleanAction, 'default':None,
-                   'help':'open editor in new window'})])
+    (['--spawn'], {'action': BooleanAction, 'default': None,
+                   'help': 'open editor in new window'})])
 class EditNewCommand(Command):
     """edit message in as new"""
     def __init__(self, message=None, spawn=None, **kwargs):
@@ -386,25 +435,35 @@ class EditNewCommand(Command):
 
 
 @registerCommand(MODE, 'fold', forced={'visible': False}, arguments=[
-    (['--all'], {'action': 'store_true', 'help':'fold all messages'})],
+    (
+        ['query'], {'help': 'query used to filter messages to affect',
+                    'nargs': '*'}),
+],
     help='fold message(s)')
 @registerCommand(MODE, 'unfold', forced={'visible': True}, arguments=[
-    (['--all'], {'action': 'store_true', 'help':'unfold all messages'})],
-    help='unfold message(s)')
+    (['query'], {'help': 'query used to filter messages to affect',
+                 'nargs': '*'}),
+], help='unfold message(s)')
 @registerCommand(MODE, 'togglesource', forced={'raw': 'toggle'}, arguments=[
-    (['--all'], {'action': 'store_true', 'help':'affect all messages'})],
-    help='display message source')
+    (['query'], {'help': 'query used to filter messages to affect',
+                 'nargs': '*'}),
+], help='display message source')
 @registerCommand(MODE, 'toggleheaders', forced={'all_headers': 'toggle'},
-                 arguments=[(['--all'], {'action': 'store_true',
-                            'help':'affect all messages'})],
+                 arguments=[
+                     (['query'], {
+                         'help': 'query used to filter messages to affect',
+                         'nargs': '*'}),
+                 ],
                  help='display all headers')
 class ChangeDisplaymodeCommand(Command):
     """fold or unfold messages"""
-    def __init__(self, all=False, visible=None, raw=None, all_headers=None,
+    repeatable = True
+
+    def __init__(self, query=None, visible=None, raw=None, all_headers=None,
                  **kwargs):
         """
-        :param all: toggle all, not only selected message
-        :type all: bool
+        :param query: notmuch query string used to filter messages to affect
+        :type query: str
         :param visible: unfold if `True`, fold if `False`, ignore if `None`
         :type visible: True, False, 'toggle' or None
         :param raw: display raw message text.
@@ -412,64 +471,80 @@ class ChangeDisplaymodeCommand(Command):
         :param all_headers: show all headers (only visible if not in raw mode)
         :type all_headers: True, False, 'toggle' or None
         """
-        self.all = all
+        self.query = None
+        if query:
+            self.query = ' '.join(query)
         self.visible = visible
         self.raw = raw
         self.all_headers = all_headers
         Command.__init__(self, **kwargs)
 
     def apply(self, ui):
-        lines = []
-        if not self.all:
-            lines.append(ui.current_buffer.get_selection())
+        tbuffer = ui.current_buffer
+        logging.debug('matching lines %s...' % (self.query))
+        if self.query is None:
+            messagetrees = [tbuffer.get_selected_messagetree()]
         else:
-            lines = ui.current_buffer.get_message_widgets()
+            messagetrees = tbuffer.messagetrees()
+            if self.query != '*':
 
-        for widget in lines:
-            msg = widget.get_message()
+                def matches(msgt):
+                    msg = msgt.get_message()
+                    return msg.matches(self.query)
 
-            # in case the thread is yet unread, remove this tag
-            if self.visible or (self.visible == 'toggle' and widget.folded):
-                if 'unread' in msg.get_tags():
-                    msg.remove_tags(['unread'])
-                    ui.apply_command(FlushCommand())
+                messagetrees = filter(matches, messagetrees)
 
+        for mt in messagetrees:
+            # determine new display values for this message
             if self.visible == 'toggle':
-                self.visible = widget.folded
+                visible = mt.is_collapsed(mt.root)
+            else:
+                visible = self.visible
             if self.raw == 'toggle':
-                self.raw = not widget.show_raw
-            if self.all_headers == 'toggle':
-                self.all_headers = not widget.show_all_headers
+                tbuffer.focus_selected_message()
+            raw = not mt.display_source if self.raw == 'toggle' else self.raw
+            all_headers = not mt.display_all_headers \
+                if self.all_headers == 'toggle' else self.all_headers
 
-            logging.debug((self.visible, self.raw, self.all_headers))
-            if self.visible is not None:
-                widget.folded = not self.visible
-            if self.raw is not None:
-                widget.show_raw = self.raw
-            if self.all_headers is not None:
-                widget.show_all_headers = self.all_headers
-            widget.rebuild()
+            # collapse/expand depending on new 'visible' value
+            if visible is False:
+                mt.collapse(mt.root)
+            elif visible is True:  # could be None
+                mt.expand(mt.root)
+            tbuffer.focus_selected_message()
+            # set new values in messagetree obj
+            if raw is not None:
+                mt.display_source = raw
+            if all_headers is not None:
+                mt.display_all_headers = all_headers
+            mt.debug()
+            # let the messagetree reassemble itself
+            mt.reassemble()
+        # refresh the buffer (clears Tree caches etc)
+        tbuffer.refresh()
 
 
 @registerCommand(MODE, 'pipeto', arguments=[
-    (['cmd'], {'help':'shellcommand to pipe to', 'nargs': '+'}),
-    (['--all'], {'action': 'store_true', 'help':'pass all messages'}),
-    (['--format'], {'help':'output format', 'default':'raw',
-                    'choices':['raw', 'decoded', 'id', 'filepath']}),
+    (['cmd'], {'help': 'shellcommand to pipe to', 'nargs': '+'}),
+    (['--all'], {'action': 'store_true', 'help': 'pass all messages'}),
+    (['--format'], {'help': 'output format', 'default': 'raw',
+                    'choices': ['raw', 'decoded', 'id', 'filepath']}),
     (['--separately'], {'action': 'store_true',
-                        'help':'call command once for each message'}),
+                        'help': 'call command once for each message'}),
     (['--background'], {'action': 'store_true',
-                        'help':'don\'t stop the interface'}),
+                        'help': 'don\'t stop the interface'}),
     (['--add_tags'], {'action': 'store_true',
-                      'help':'add \'Tags\' header to the message'}),
+                      'help': 'add \'Tags\' header to the message'}),
     (['--shell'], {'action': 'store_true',
-                   'help':'let the shell interpret the command'}),
+                   'help': 'let the shell interpret the command'}),
     (['--notify_stdout'], {'action': 'store_true',
-                           'help':'display cmd\'s stdout as notification'}),
+                           'help': 'display cmd\'s stdout as notification'}),
 ],
 )
 class PipeCommand(Command):
     """pipe message(s) to stdin of a shellcommand"""
+    repeatable = True
+
     def __init__(self, cmd, all=False, separately=False, background=False,
                  shell=False, notify_stdout=False, format='raw',
                  add_tags=False, noop_msg='no command specified',
@@ -487,7 +562,7 @@ class PipeCommand(Command):
         :type notify_stdout: bool
         :param shell: let the shell interpret the command
         :type shell: bool
-        :param format: what to pipe to the processes stdin. one of:
+
                        'raw': message content as is,
                        'decoded': message content, decoded quoted printable,
                        'id': message ids, separated by newlines,
@@ -590,7 +665,7 @@ class PipeCommand(Command):
                 # seem to be non-blocking!
                 proc = subprocess.Popen(self.cmd, shell=True,
                                         stdin=subprocess.PIPE,
-                                        #stdout=subprocess.PIPE,
+                                        # stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE)
                 out, err = proc.communicate(mail)
                 logging.debug('start urwid screen')
@@ -605,9 +680,11 @@ class PipeCommand(Command):
 
 
 @registerCommand(MODE, 'remove', arguments=[
-    (['--all'], {'action': 'store_true', 'help':'remove whole thread'})])
+    (['--all'], {'action': 'store_true', 'help': 'remove whole thread'})])
 class RemoveCommand(Command):
     """remove message(s) from the index"""
+    repeatable = True
+
     def __init__(self, all=False, **kwargs):
         """
         :param all: remove all messages from thread, not just selected one
@@ -649,16 +726,18 @@ class RemoveCommand(Command):
 
 
 @registerCommand(MODE, 'print', arguments=[
-    (['--all'], {'action': 'store_true', 'help':'print all messages'}),
-    (['--raw'], {'action': 'store_true', 'help':'pass raw mail string'}),
+    (['--all'], {'action': 'store_true', 'help': 'print all messages'}),
+    (['--raw'], {'action': 'store_true', 'help': 'pass raw mail string'}),
     (['--separately'], {'action': 'store_true',
-                        'help':'call print command once for each message'}),
+                        'help': 'call print command once for each message'}),
     (['--add_tags'], {'action': 'store_true',
-                      'help':'add \'Tags\' header to the message'}),
+                      'help': 'add \'Tags\' header to the message'}),
 ],
 )
 class PrintCommand(PipeCommand):
     """print message(s)"""
+    repeatable = True
+
     def __init__(self, all=False, separately=False, raw=False, add_tags=False,
                  **kwargs):
         """
@@ -696,8 +775,8 @@ class PrintCommand(PipeCommand):
 
 
 @registerCommand(MODE, 'save', arguments=[
-    (['--all'], {'action': 'store_true', 'help':'save all attachments'}),
-    (['path'], {'nargs':'?', 'help':'path to save to'})])
+    (['--all'], {'action': 'store_true', 'help': 'save all attachments'}),
+    (['path'], {'nargs': '?', 'help': 'path to save to'})])
 class SaveAttachmentCommand(Command):
     """save attachment(s)"""
     def __init__(self, all=False, path=None, **kwargs):
@@ -820,6 +899,39 @@ class OpenAttachmentCommand(Command):
             ui.notify('unknown mime type')
 
 
+@registerCommand(MODE, 'move', help='move focus in current buffer',
+                 arguments=[(['movement'], {
+                             'nargs': argparse.REMAINDER,
+                             'help': 'up, down, page up, page down, first'})])
+class MoveFocusCommand(MoveCommand):
+    def apply(self, ui):
+        logging.debug(self.movement)
+        tbuffer = ui.current_buffer
+        if self.movement == 'parent':
+            tbuffer.focus_parent()
+        elif self.movement == 'first reply':
+            tbuffer.focus_first_reply()
+        elif self.movement == 'last reply':
+            tbuffer.focus_last_reply()
+        elif self.movement == 'next sibling':
+            tbuffer.focus_next_sibling()
+        elif self.movement == 'previous sibling':
+            tbuffer.focus_prev_sibling()
+        elif self.movement == 'next':
+            tbuffer.focus_next()
+        elif self.movement == 'previous':
+            tbuffer.focus_prev()
+        elif self.movement == 'next unfolded':
+            tbuffer.focus_next_unfolded()
+        elif self.movement == 'previous unfolded':
+            tbuffer.focus_prev_unfolded()
+        else:
+            MoveCommand.apply(self, ui)
+        # TODO add 'next matching' if threadbuffer stores the original query
+        # TODO: add next by date..
+        tbuffer.body.refresh()
+
+
 @registerCommand(MODE, 'select')
 class ThreadSelectCommand(Command):
     """select focussed element. The fired action depends on the focus:
@@ -827,45 +939,49 @@ class ThreadSelectCommand(Command):
         - if attachment line, this opens the attachment"""
     def apply(self, ui):
         focus = ui.get_deep_focus()
-        if isinstance(focus, MessageSummaryWidget):
-            ui.apply_command(ChangeDisplaymodeCommand(visible='toggle'))
-        elif isinstance(focus, AttachmentWidget):
+        if isinstance(focus, AttachmentWidget):
             logging.info('open attachment')
             ui.apply_command(OpenAttachmentCommand(focus.get_attachment()))
         else:
-            logging.info('unknown widget %s' % focus)
+            ui.apply_command(ChangeDisplaymodeCommand(visible='toggle'))
 
 
 @registerCommand(MODE, 'tag', forced={'action': 'add'}, arguments=[
-    (['--all'], {'action': 'store_true', 'help':'tag all messages in thread'}),
+    (['--all'], {'action': 'store_true',
+     'help': 'tag all messages in thread'}),
     (['--no-flush'], {'action': 'store_false', 'dest': 'flush',
                       'help': 'postpone a writeout to the index'}),
-    (['tags'], {'help':'comma separated list of tags'})],
+    (['tags'], {'help': 'comma separated list of tags'})],
     help='add tags to message(s)',
 )
 @registerCommand(MODE, 'retag', forced={'action': 'set'}, arguments=[
-    (['--all'], {'action': 'store_true', 'help':'tag all messages in thread'}),
+    (['--all'], {'action': 'store_true',
+     'help': 'tag all messages in thread'}),
     (['--no-flush'], {'action': 'store_false', 'dest': 'flush',
                       'help': 'postpone a writeout to the index'}),
-    (['tags'], {'help':'comma separated list of tags'})],
+    (['tags'], {'help': 'comma separated list of tags'})],
     help='set message(s) tags.',
 )
 @registerCommand(MODE, 'untag', forced={'action': 'remove'}, arguments=[
-    (['--all'], {'action': 'store_true', 'help':'tag all messages in thread'}),
+    (['--all'], {'action': 'store_true',
+     'help': 'tag all messages in thread'}),
     (['--no-flush'], {'action': 'store_false', 'dest': 'flush',
                       'help': 'postpone a writeout to the index'}),
-    (['tags'], {'help':'comma separated list of tags'})],
+    (['tags'], {'help': 'comma separated list of tags'})],
     help='remove tags from message(s)',
 )
 @registerCommand(MODE, 'toggletags', forced={'action': 'toggle'}, arguments=[
-    (['--all'], {'action': 'store_true', 'help':'tag all messages in thread'}),
+    (['--all'], {'action': 'store_true',
+     'help': 'tag all messages in thread'}),
     (['--no-flush'], {'action': 'store_false', 'dest': 'flush',
                       'help': 'postpone a writeout to the index'}),
-    (['tags'], {'help':'comma separated list of tags'})],
+    (['tags'], {'help': 'comma separated list of tags'})],
     help='flip presence of tags on message(s)',
 )
 class TagCommand(Command):
     """manipulate message tags"""
+    repeatable = True
+
     def __init__(self, tags=u'', action='add', all=False, flush=True,
                  **kwargs):
         """
@@ -887,21 +1003,29 @@ class TagCommand(Command):
         Command.__init__(self, **kwargs)
 
     def apply(self, ui):
-        all_message_widgets = ui.current_buffer.get_messagewidgets()
+        tbuffer = ui.current_buffer
         if self.all:
-            mwidgets = all_message_widgets
+            messagetrees = tbuffer.messagetrees()
         else:
-            mwidgets = [ui.current_buffer.get_selection()]
-        messages = [mw.get_message() for mw in mwidgets]
-        logging.debug('TAG %s' % str(messages))
+            messagetrees = [tbuffer.get_selected_messagetree()]
 
         def refresh_widgets():
-            for mw in all_message_widgets:
-                mw.rebuild()
+            for mt in messagetrees:
+                mt.refresh()
+
+            # put currently selected message id on a block list for the
+            # auto-remove-unread feature. This makes sure that explicit
+            # tag-unread commands for the current message are not undone on the
+            # next keypress (triggering the autorm again)...
+            mid = tbuffer.get_selected_mid()
+            tbuffer._auto_unread_dont_touch_mids.add(mid)
+
+            tbuffer.refresh()
 
         tags = filter(lambda x: x, self.tagsstring.split(','))
         try:
-            for m in messages:
+            for mt in messagetrees:
+                m = mt.get_message()
                 if self.action == 'add':
                     m.add_tags(tags, afterwards=refresh_widgets)
                 if self.action == 'set':
@@ -919,6 +1043,7 @@ class TagCommand(Command):
                             to_add.append(t)
                     m.remove_tags(to_remove)
                     m.add_tags(to_add, afterwards=refresh_widgets)
+
         except DatabaseROError:
             ui.notify('index in read-only mode', priority='error')
             return

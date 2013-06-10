@@ -6,6 +6,7 @@ import logging
 
 from alot.commands import Command, registerCommand
 from alot.commands.globals import PromptCommand
+from alot.commands.globals import MoveCommand
 
 from alot.db.errors import DatabaseROError
 from alot import commands
@@ -79,6 +80,8 @@ class RefineCommand(Command):
 @registerCommand(MODE, 'refineprompt')
 class RefinePromptCommand(Command):
     """prompt to change this buffers querystring"""
+    repeatable = True
+
     def apply(self, ui):
         sbuffer = ui.current_buffer
         oldquery = sbuffer.querystring
@@ -141,6 +144,8 @@ class RetagPromptCommand(Command):
     """)
 class TagCommand(Command):
     """manipulate message tags"""
+    repeatable = True
+
     def __init__(self, tags=u'', action='add', allmessages=False, flush=True,
                  **kwargs):
         """
@@ -228,3 +233,15 @@ class TagCommand(Command):
         # flush index
         if self.flush:
             ui.apply_command(commands.globals.FlushCommand(callback=refresh))
+
+@registerCommand(MODE, 'move', help='move focus in search buffer',
+                 arguments=[(['movement'], {
+                             'nargs': argparse.REMAINDER,
+                             'help': 'last'})])
+class MoveFocusCommand(MoveCommand):
+    def apply(self, ui):
+        logging.debug(self.movement)
+        if self.movement == 'last':
+            ui.current_buffer.focus_last()
+        else:
+            MoveCommand.apply(self, ui)

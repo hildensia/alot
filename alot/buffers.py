@@ -4,6 +4,7 @@
 import urwid
 import os
 from notmuch import NotmuchError
+import logging
 
 from settings import settings
 import commands
@@ -16,7 +17,8 @@ from alot.widgets.globals import HeadersList
 from alot.widgets.globals import AttachmentWidget
 from alot.widgets.bufferlist import BufferlineWidget
 from alot.widgets.search import ThreadlineWidget
-from alot.widgets.thread import MessageWidget
+from alot.widgets.thread import ThreadTree
+from alot.foreign.urwidtrees import ArrowTree, TreeBox, NestedTree
 
 
 class Buffer(object):
@@ -42,7 +44,7 @@ class Buffer(object):
         pass
 
     def keypress(self, size, key):
-            return self.body.keypress(size, key)
+        return self.body.keypress(size, key)
 
     def cleanup(self):
         """called before buffer is closed"""
@@ -108,6 +110,9 @@ class BufferlistBuffer(Buffer):
         bufferlinewidget = linewidget.get_focus().original_widget
         return bufferlinewidget.get_buffer()
 
+    def focus_first(self):
+        self.body.set_focus(0)
+
 
 class EnvelopeBuffer(Buffer):
     """message composition mode"""
@@ -137,7 +142,7 @@ class EnvelopeBuffer(Buffer):
     def rebuild(self):
         displayed_widgets = []
         hidden = settings.get('envelope_headers_blacklist')
-        #build lines
+        # build lines
         lines = []
         for (k, vlist) in self.envelope.headers.items():
             if (k not in hidden) or self.all_headers:
@@ -179,7 +184,7 @@ class EnvelopeBuffer(Buffer):
             self.header_wgt = HeadersList(lines, key_att, value_att, gaps_att)
             displayed_widgets.append(self.header_wgt)
 
-        #display attachments
+        # display attachments
         lines = []
         for a in self.envelope.attachments:
             lines.append(AttachmentWidget(a, selectable=False))
@@ -240,13 +245,7 @@ class SearchBuffer(Buffer):
                 self.proc.terminate()
 
     def rebuild(self):
-        if self.isinitialized:
-            pass
-            #focusposition = self.threadlist.get_focus()[1]
-        else:
-            #focusposition = 0
-            self.isinitialized = True
-
+        self.isinitialized = True
         self.kill_filler_process()
 
         self.result_count = self.dbman.count_messages(self.querystring)
@@ -264,7 +263,6 @@ class SearchBuffer(Buffer):
                                      dbman=self.dbman)
 
         self.listbox = urwid.ListBox(self.threadlist)
-        #self.threadlist.set_focus(focusposition)
         self.body = self.listbox
 
     def get_selected_threadline(self):
@@ -283,6 +281,18 @@ class SearchBuffer(Buffer):
             thread = threadlinewidget.get_thread()
         return thread
 
+    def consume_pipe(self):
+        while not self.threadlist.empty:
+            self.threadlist._get_next_item()
+
+    def focus_first(self):
+        self.body.set_focus(0)
+
+    def focus_last(self):
+        self.consume_pipe()
+        num_lines = len(self.threadlist.get_lines())
+        self.body.set_focus(num_lines-1)
+
 
 class ThreadBuffer(Buffer):
     """displays a thread as a tree of messages"""
@@ -290,8 +300,19 @@ class ThreadBuffer(Buffer):
     modename = 'thread'
 
     def __init__(self, ui, thread):
-        self.message_count = thread.get_total_messages()
+        """
+        :param ui: main UI
+        :type ui: :class:`~alot.ui.UI`
+        :param thread: thread to display
+        :type thread: :class:`~alot.db.Thread`
+        """
         self.thread = thread
+        self.message_count = thread.get_total_messages()
+
+        # two semaphores for auto-removal of unread tag
+        self._auto_unread_dont_touch_mids = set([])
+        self._auto_unread_writing = False
+
         self.rebuild()
         Buffer.__init__(self, ui, self.body)
 
@@ -312,11 +333,6 @@ class ThreadBuffer(Buffer):
         """returns the displayed :class:`~alot.db.Thread`"""
         return self.thread
 
-    def _build_pile(self, acc, msg, parent, depth):
-        acc.append((parent, depth, msg))
-        for reply in self.thread.get_replies_to(msg):
-            self._build_pile(acc, reply, msg, depth + 1)
-
     def rebuild(self):
         try:
             self.thread.refresh()
@@ -324,89 +340,260 @@ class ThreadBuffer(Buffer):
             self.body = urwid.SolidFill()
             self.message_count = 0
             return
-        # depth-first traversing the thread-tree, thereby
-        # 1) build a list of tuples (parentmsg, depth, message) in DF order
-        # 2) create a dict that counts no. of direct replies per message
-        messages = list()  # accumulator for 1,
-        childcount = {None: 0}  # accumulator for 2)
-        for msg, replies in self.thread.get_messages().items():
-            childcount[msg] = len(replies)
-        # start with all toplevel msgs, then recursively call _build_pile
-        for msg in self.thread.get_toplevel_messages():
-            self._build_pile(messages, msg, None, 0)
-            childcount[None] += 1
 
-        # go through list from 1) and pile up message widgets for all msgs.
-        # each one will be given its depth, if siblings follow and where to
-        # draw bars (siblings follow at lower depths)
-        msglines = list()
-        bars = []
-        for (num, (p, depth, m)) in enumerate(messages):
-            bars = bars[:depth]
-            childcount[p] -= 1
+        self._tree = ThreadTree(self.thread)
 
-            bars.append(childcount[p] > 0)
-            mwidget = MessageWidget(m, even=(num % 2 == 0),
-                                    depth=depth,
-                                    bars_at=bars)
-            msglines.append(mwidget)
-
-        self.body = urwid.ListBox(urwid.SimpleListWalker(msglines))
+        bars_att = settings.get_theming_attribute('thread', 'arrow_bars')
+        heads_att = settings.get_theming_attribute('thread', 'arrow_heads')
+        A = ArrowTree(self._tree,
+                      indent=2,
+                      childbar_offset=0,
+                      arrow_tip_att=heads_att,
+                      arrow_att=bars_att,
+                      )
+        self._nested_tree = NestedTree(A, interpret_covered=True)
+        self.body = TreeBox(self._nested_tree)
         self.message_count = self.thread.get_total_messages()
 
-    def get_selection(self):
-        """returns focussed :class:`~alot.widgets.MessageWidget`"""
-        (messagewidget, size) = self.body.get_focus()
-        return messagewidget
+    def render(self, size, focus=False):
+        if settings.get('auto_remove_unread'):
+            logging.debug('Tbuffer: auto remove unread tag from msg?')
+            msg = self.get_selected_message()
+            mid = msg.get_message_id()
+            focus_pos = self.body.get_focus()[1]
+            summary_pos = (self.body.get_focus()[1][0], (0,))
+            cursor_on_non_summary = (focus_pos != summary_pos)
+            if cursor_on_non_summary:
+                if not mid in self._auto_unread_dont_touch_mids:
+                    if 'unread' in msg.get_tags():
+                        logging.debug('Tbuffer: removing unread')
 
-    def get_messagewidgets(self):
-        """returns all message widgets contained in this list"""
-        return self.body.body.contents
+                        def clear():
+                            self._auto_unread_writing = False
+
+                        self._auto_unread_dont_touch_mids.add(mid)
+                        self._auto_unread_writing = True
+                        msg.remove_tags(['unread'], afterwards=clear)
+                        fcmd = commands.globals.FlushCommand(silent=True)
+                        self.ui.apply_command(fcmd)
+                    else:
+                        logging.debug('Tbuffer: No, msg not unread')
+                else:
+                    logging.debug('Tbuffer: No, mid locked for autorm-unread')
+            else:
+                if not self._auto_unread_writing and \
+                   mid in self._auto_unread_dont_touch_mids:
+                    self._auto_unread_dont_touch_mids.remove(mid)
+                logging.debug('Tbuffer: No, cursor on summary')
+        return self.body.render(size, focus)
+
+    def get_selected_mid(self):
+        """returns Message ID of focussed message"""
+        return self.body.get_focus()[1][0]
+
+    def get_selected_message_position(self):
+        """returns position of focussed message in the thread tree"""
+        return self._sanitize_position((self.get_selected_mid(),))
+
+    def get_selected_messagetree(self):
+        """returns currently focussed :class:`MessageTree`"""
+        return self._nested_tree[self.body.get_focus()[1][:1]]
 
     def get_selected_message(self):
         """returns focussed :class:`~alot.db.message.Message`"""
-        messagewidget = self.get_selection()
-        return messagewidget.get_message()
+        return self.get_selected_messagetree()._message
 
-    def get_message_widgets(self):
+    def get_messagetree_positions(self):
         """
-        returns all :class:`MessageWidgets <alot.widgets.MessageWidget>`
-        displayed in this thread-tree.
+        returns a Generator to walk through all positions of
+        :class:`MessageTree` in the :class:`ThreadTree` of this buffer.
         """
-        return self.body.body.contents
+        return [(pos,) for pos in self._tree.positions()]
 
+    def messagetrees(self):
+        """
+        returns a Generator of all :class:`MessageTree` in the
+        :class:`ThreadTree` of this buffer.
+        """
+        for pos in self._tree.positions():
+            yield self._tree[pos]
+
+    def refresh(self):
+        """refresh and flushe caches of Thread tree"""
+        self.body.refresh()
+
+    # needed for ui.get_deep_focus..
     def get_focus(self):
         return self.body.get_focus()
 
+    def set_focus(self, pos):
+        logging.debug('setting focus to %s ' % str(pos))
+        self.body.set_focus(pos)
+
+    def focus_first(self):
+        """set focus to first message of thread"""
+        self.body.set_focus(self._nested_tree.root)
+
+    def _sanitize_position(self, pos):
+        return self._nested_tree._sanitize_position(pos,
+                                                    self._nested_tree._tree)
+
+    def focus_selected_message(self):
+        """focus the summary line of currently focussed message"""
+        # move focus to summary (root of current MessageTree)
+        self.set_focus(self.get_selected_message_position())
+
+    def focus_parent(self):
+        """move focus to parent of currently focussed message"""
+        mid = self.get_selected_mid()
+        newpos = self._tree.parent_position(mid)
+        if newpos is not None:
+            newpos = self._sanitize_position((newpos,))
+            self.body.set_focus(newpos)
+
+    def focus_first_reply(self):
+        """move focus to first reply to currently focussed message"""
+        mid = self.get_selected_mid()
+        newpos = self._tree.first_child_position(mid)
+        if newpos is not None:
+            newpos = self._sanitize_position((newpos,))
+            self.body.set_focus(newpos)
+
+    def focus_last_reply(self):
+        """move focus to last reply to currently focussed message"""
+        mid = self.get_selected_mid()
+        newpos = self._tree.last_child_position(mid)
+        if newpos is not None:
+            newpos = self._sanitize_position((newpos,))
+            self.body.set_focus(newpos)
+
+    def focus_next_sibling(self):
+        """focus next sibling of currently focussed message in thread tree"""
+        mid = self.get_selected_mid()
+        newpos = self._tree.next_sibling_position(mid)
+        if newpos is not None:
+            newpos = self._sanitize_position((newpos,))
+            self.body.set_focus(newpos)
+
+    def focus_prev_sibling(self):
+        """
+        focus previous sibling of currently focussed message in thread tree
+        """
+        mid = self.get_selected_mid()
+        localroot = self._sanitize_position((mid,))
+        if localroot == self.get_focus()[1]:
+            newpos = self._tree.prev_sibling_position(mid)
+            if newpos is not None:
+                newpos = self._sanitize_position((newpos,))
+        else:
+            newpos = localroot
+        if newpos is not None:
+            self.body.set_focus(newpos)
+
+    def focus_next(self):
+        """focus next message in depth first order"""
+        mid = self.get_selected_mid()
+        newpos = self._tree.next_position(mid)
+        if newpos is not None:
+            newpos = self._sanitize_position((newpos,))
+            self.body.set_focus(newpos)
+
+    def focus_prev(self):
+        """focus previous message in depth first order"""
+        mid = self.get_selected_mid()
+        localroot = self._sanitize_position((mid,))
+        if localroot == self.get_focus()[1]:
+            newpos = self._tree.prev_position(mid)
+            if newpos is not None:
+                newpos = self._sanitize_position((newpos,))
+        else:
+            newpos = localroot
+        if newpos is not None:
+            self.body.set_focus(newpos)
+
+    def focus_property(self, prop, direction):
+        """does a walk in the given direction and focuses the
+        first message tree that matches the given property"""
+        newpos = self.get_selected_mid()
+        newpos = direction(newpos)
+        while newpos is not None:
+            MT = self._tree[newpos]
+            if prop(MT):
+                newpos = self._sanitize_position((newpos,))
+                self.body.set_focus(newpos)
+                break
+            newpos = direction(newpos)
+
+    def focus_next_matching(self, querystring):
+        """focus next matching message in depth first order"""
+        self.focus_property(
+                lambda x: x._message.matches(querystring),
+                self._tree.next_position)
+
+    def focus_prev_matching(self, querystring):
+        """focus previous matching message in depth first order"""
+        self.focus_property(
+                lambda x: x._message.matches(querystring),
+                self._tree.prev_position)
+
+    def focus_next_unfolded(self):
+        """focus next unfolded message in depth first order"""
+        self.focus_property(
+                lambda x: not x.is_collapsed(x.root),
+                self._tree.next_position)
+
+    def focus_prev_unfolded(self):
+        """focus previous unfolded message in depth first order"""
+        self.focus_property(
+                lambda x: not x.is_collapsed(x.root),
+                self._tree.prev_position)
+
+    def expand(self, msgpos):
+        """expand message at given position"""
+        MT = self._tree[msgpos]
+        MT.expand(MT.root)
+
+    def messagetree_at_position(self, pos):
+        """get :class:`MessageTree` for given position"""
+        return self._tree[pos[0]]
+
+    def expand_all(self):
+        """expand all messages in thread"""
+        for MT in self.messagetrees():
+            MT.expand(MT.root)
+
+    def collapse(self, msgpos):
+        """collapse message at given position"""
+        MT = self._tree[msgpos]
+        MT.collapse(MT.root)
+        self.focus_selected_message()
+
+    def collapse_all(self):
+        """collapse all messages in thread"""
+        for MT in self.messagetrees():
+            MT.collapse(MT.root)
+        self.focus_selected_message()
+
     def unfold_matching(self, querystring, focus_first=True):
         """
-        unfolds messages that match a given querystring.
+        expand all messages that match a given querystring.
 
         :param querystring: query to match
         :type querystring: str
         :param focus_first: set the focus to the first matching message
         :type focus_first: bool
         """
-        i = 0
-        for mw in self.get_message_widgets():
-            msg = mw.get_message()
+        first = None
+        for MT in self.messagetrees():
+            msg = MT._message
             if msg.matches(querystring):
-                if focus_first:
-                    # let urwid.ListBox focus this widget:
-                    # The first parameter is a "size" tuple: that needs only to
-                    # be iterable an is *never* used. i is the integer index
-                    # to focus. offset_inset is may be used to shift the
-                    # visible area so that the focus lies at given offset
-                    self.body.change_focus((0, 0), i,
-                                           offset_inset=0,
-                                           coming_from='above')
-                    focus_first = False
-                mw.folded = False
-                if 'unread' in msg.get_tags():
-                    msg.remove_tags(['unread'])
-                    self.ui.apply_command(commands.globals.FlushCommand())
-                mw.rebuild()
-            i = i + 1
+                MT.expand(MT.root)
+                if first is None:
+                    first = (self._tree.position_of_messagetree(MT), MT.root)
+                    self.body.set_focus(first)
+            else:
+                MT.collapse(MT.root)
+        self.body.refresh()
 
 
 class TagListBuffer(Buffer):
@@ -453,6 +640,9 @@ class TagListBuffer(Buffer):
         self.body = self.taglist
 
         self.taglist.set_focus(focusposition % len(displayedtags))
+
+    def focus_first(self):
+        self.body.set_focus(0)
 
     def get_selected_tag(self):
         """returns selected tagstring"""
