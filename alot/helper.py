@@ -27,7 +27,8 @@ def split_commandline(s, comments=False, posix=True):
     """
     splits semi-colon separated commandlines
     """
-    # shlex seems to remove unescaped quotes
+    # shlex seems to remove unescaped quotes and backslashes
+    s = s.replace('\\', '\\\\')
     s = s.replace('\'', '\\\'')
     s = s.replace('\"', '\\\"')
     # encode s to utf-8 for shlex
@@ -294,7 +295,7 @@ def call_cmd(cmdlist, stdin=None):
     :type cmdlist: list of str
     :param stdin: string to pipe to the process
     :type stdin: str
-    :return: triple of stdout, error msg, return value of the shell command
+    :return: triple of stdout, stderr, return value of the shell command
     :rtype: str, str, int
     """
 
@@ -307,11 +308,14 @@ def call_cmd(cmdlist, stdin=None):
             out, err = proc.communicate(stdin)
             ret = proc.poll()
         else:
-            out = subprocess.check_output(cmdlist)
-            # todo: get error msg. rval
-    except (subprocess.CalledProcessError, OSError), e:
-        err = str(e)
-        ret = -1
+            try:
+                out = subprocess.check_output(cmdlist)
+            except subprocess.CalledProcessError as e:
+                err = e.output
+                ret = e.returncode
+    except OSError as e:
+        err = e.strerror
+        ret = e.errno
 
     out = string_decode(out, urwid.util.detected_encoding)
     err = string_decode(err, urwid.util.detected_encoding)
@@ -380,10 +384,10 @@ def guess_mimetype(blob):
     #
     # the version with open() is the bindings shipped with the file source from
     # http://darwinsys.com/file/ - this is what is used by the python-magic
-    # package on Debian/Ubuntu.  However it is not available on pypi/via pip.
+    # package on Debian/Ubuntu. However, it is not available on pypi/via pip.
     #
-    # the version with from_buffer() is from https://github.com/ahupp/python-magic
-    # which is installable via pip.
+    # the version with from_buffer() is available at
+    # https://github.com/ahupp/python-magic and directly installable via pip.
     #
     # for more detail see https://github.com/pazz/alot/pull/588
     if hasattr(magic, 'open'):
@@ -417,8 +421,8 @@ def guess_encoding(blob):
     # http://darwinsys.com/file/ - this is what is used by the python-magic
     # package on Debian/Ubuntu.  However it is not available on pypi/via pip.
     #
-    # the version with from_buffer() is from https://github.com/ahupp/python-magic
-    # which is installable via pip.
+    # the version with from_buffer() is available at
+    # https://github.com/ahupp/python-magic and directly installable via pip.
     #
     # for more detail see https://github.com/pazz/alot/pull/588
     if hasattr(magic, 'open'):

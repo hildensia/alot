@@ -7,7 +7,6 @@ from twisted.internet import reactor, defer
 
 from settings import settings
 from buffers import BufferlistBuffer
-from commands import commandfactory
 from alot.commands import CommandParseError
 from alot.commands.globals import CommandSequenceCommand
 from alot.helper import string_decode
@@ -115,7 +114,6 @@ class UI(object):
                 if self._alarm is not None:
                     self.mainloop.remove_alarm(self._alarm)
                 self.input_queue = []
-                self.update()
 
             def fire(ignored, cmdline):
                 clear()
@@ -127,7 +125,7 @@ class UI(object):
                         self.notify(e.message, priority='error')
                 # move keys are always passed
                 elif cmdline in ['move up', 'move down', 'move page up',
-                               'move page down']:
+                                 'move page down']:
                     return [cmdline[5:]]
 
             key = keys[0]
@@ -165,7 +163,8 @@ class UI(object):
     def apply_commandline(self, cmdline):
         """
         Dispatches the interpretation of the command line string to
-        :class:`CommandSequenceCommand <alot.commands.globals.CommandSequenceCommand>`.
+        :class:`CommandSequenceCommand
+        <alot.commands.globals.CommandSequenceCommand>`.
 
         :param cmdline: command line to interpret
         :type cmdline: str
@@ -222,12 +221,19 @@ class UI(object):
             self._passall = False
             d.callback(text)
 
+        def cerror(e):
+            logging.error(e)
+            self.notify('completion error: %s' % e.message,
+                        priority='error')
+            self.update()
+
         prefix = prefix + settings.get('prompt_suffix')
 
         # set up widgets
         leftpart = urwid.Text(prefix, align='left')
         editpart = CompleteEdit(completer, on_exit=select_or_cancel,
-                                edit_text=text, history=history)
+                                edit_text=text, history=history,
+                                on_error=cerror)
 
         for i in range(tab):  # hit some tabs
             editpart.keypress((0,), 'tab')
